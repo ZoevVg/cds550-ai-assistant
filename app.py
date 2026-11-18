@@ -9,36 +9,38 @@ from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.output_parsers import StrOutputParser
 
 # ==========================================
-# 0. 页面设置与 Secrets 安全读取
+# 0. 页面设置
 # ==========================================
 st.set_page_config(page_title="CDS550 AI Workstation", page_icon="🎓", layout="wide")
-
-# 尝试安全地读取 Secrets（适配 Streamlit Cloud 和本地 secrets.toml）
-try:
-    ZHIPU_API_KEY = st.secrets["ZHIPU_API_KEY"]
-    DEEPSEEK_API_KEY = st.secrets["DEEPSEEK_API_KEY"]
-    # 将智谱的 Key 写入环境变量，供 Embedding 使用
-    os.environ["OPENAI_API_KEY"] = ZHIPU_API_KEY
-except KeyError:
-    st.error("⚠️ 配置缺失：请确保在 Streamlit Cloud 的 Secrets 或本地 .streamlit/secrets.toml 中配置了 ZHIPU_API_KEY 和 DEEPSEEK_API_KEY。")
-    st.stop()
+st.title("🎓 CDS550 复合模型协作工作台")
+st.markdown("**思考 → 生成 → 批判 → 修订**：展示完整的 AI 思考过程，严格基于 PDF 内容。")
 
 ZHIPU_BASE_URL = "https://open.bigmodel.cn/api/paas/v4/"
 DEEPSEEK_BASE_URL = "https://api.deepseek.com"
 
 # ==========================================
-# 1. 页面 UI 设计
+# 1. 侧边栏：让访客输入自己的 API Key
 # ==========================================
-st.title("🎓 CDS550 复合模型协作工作台")
-st.markdown("**思考 → 生成 → 批判 → 修订**：展示完整的 AI 思考过程，严格基于 PDF 内容，拒绝幻觉。")
-
 with st.sidebar:
+    st.header("🔑 API Key 配置")
+    st.caption("为了保护隐私和避免额度耗尽，请输入你自己的 API Key。")
+    
+    # 使用 type="password" 隐藏输入内容
+    user_zhipu_key = st.text_input("智谱 API Key (必填)", type="password")
+    user_deepseek_key = st.text_input("DeepSeek API Key (必填)", type="password")
+    
+    # 如果用户没有填写 Key，则暂停后续操作
+    if not user_zhipu_key or not user_deepseek_key:
+        st.warning("⚠️ 请先在左侧填写你的 API Key 才能使用本应用。")
+        st.info("💡 如果你没有 Key，可以前往智谱AI (open.bigmodel.cn) 或 DeepSeek (platform.deepseek.com) 免费注册获取。")
+        st.stop()  # 停止执行，不渲染后面的界面
+
+    st.success("✅ API Key 已配置")
+    st.markdown("---")
     st.header("📁 上传课件")
     uploaded_file = st.file_uploader("请上传 Lecture PDF", type="pdf")
     st.info("上传后，系统会自动解析并建立知识库。")
-    st.markdown("---")
-    st.markdown("### 💡 关于系统")
-    st.markdown("本系统采用 **智谱 GLM-4-Flash + DeepSeek** 的复合模型架构。")
+
 
 if "messages" not in st.session_state:
     st.session_state.messages = []
@@ -53,35 +55,40 @@ if uploaded_file is not None:
         temp_pdf_path = temp_pdf.name
 
     @st.cache_resource(show_spinner="正在解析 PDF 并建立知识库...")
-    def process_pdf(file_path):
+    def process_pdf(file_path, zhipu_key):
         loader = PyPDFLoader(file_path)
         docs = loader.load()
         text_splitter = RecursiveCharacterTextSplitter(chunk_size=800, chunk_overlap=100)
         splits = text_splitter.split_documents(docs)
-        # Embedding 必须固定使用智谱
-        embeddings = OpenAIEmbeddings(model="embedding-2", openai_api_base=ZHIPU_BASE_URL)
+        
+        # 关键修改：将访客的 Key 显式传递给 Embedding
+        embeddings = OpenAIEmbeddings(
+            model="embedding-2", 
+            openai_api_base=ZHIPU_BASE_URL,
+            api_key=zhipu_key 
+        )
         vectorstore = FAISS.from_documents(splits, embeddings)
         return vectorstore
 
-    vectorstore = process_pdf(temp_pdf_path)
+    # 将用户填写的 Key 传入处理函数
+    vectorstore = process_pdf(temp_pdf_path, user_zhipu_key)
     retriever = vectorstore.as_retriever(search_kwargs={"k": 3})
     
-    # 模型 A：智谱（生成与修订）
+    # 关键修改：使用访客填写的 Key 初始化模型
     model_zhipu = ChatOpenAI(
         model="glm-4-flash", 
         temperature=0, 
-        openai_api_base=ZHIPU_BASE_URL
+        openai_api_base=ZHIPU_BASE_URL,
+        api_key=user_zhipu_key
     )
     
-    # 模型 B：DeepSeek（批判与审查）
     model_deepseek = ChatOpenAI(
         model="deepseek-chat", 
-        api_key=DEEPSEEK_API_KEY, 
+        api_key=user_deepseek_key, 
         base_url=DEEPSEEK_BASE_URL, 
         temperature=0.1
     )
 
-    # 使用标签页区分功能
     tab1, tab2, tab3 = st.tabs(["💬 复合模型问答", "📝 随堂测验生成", "📄 课件一键总结"])
 
     # ==========================================
